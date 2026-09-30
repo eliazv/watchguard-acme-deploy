@@ -1,87 +1,83 @@
 # Testing without WatchGuard hardware
 
-## Implemented offline checks
+## Current validation level
 
-Run `go test ./...` and `go vet ./...`. The suite generates X.509 certificate/key pairs, checks mismatch detection and fingerprints, exercises the documented OAuth/device/certificate/install/deployment requests against `httptest.Server`, verifies that POST mutations are not retried after an HTTP 500 and that API errors do not include response bodies, and checks that CLI dry-run sends no mutation request.
+Current project status is **Level 2 — mocked API**.
 
-The remaining high-value validation is on a cloud-managed Firebox. In particular, the install command is asynchronous, and the certificate inventory reports WatchGuard Cloud objects rather than the certificate served on a specific Firebox endpoint. Test both a real deployment transaction and `--verify-host` before claiming a renewal is fully automatic.
+The offline suite covers generated X.509 certificate/key pairs, key mismatch detection, fingerprints, OAuth, device discovery, certificate create/list/install requests, documented asynchronous transaction response shapes, transaction polling, mutation retry safety, token refresh and CLI dry-run behavior.
 
-`--deploy-config` sends a full configuration deployment with `staged=false`. WatchGuard documents that this distributes all pending configuration changes for that device. Review those changes before using the flag.
-
-This project can be developed to a high confidence level without initially owning a WatchGuard appliance, but it must distinguish between **software correctness** and **real-device validation**.
+The next meaningful milestone is not more mocked code. It is a cloud-managed Firebox or FireboxV test.
 
 ## What we can test without a Firebox
 
 ### 1. Certificate parsing
 
-Generate temporary test certificates during tests and validate:
+Generate temporary test certificates and validate:
 
-- PEM parsing;
-- private-key parsing;
+- PEM and private-key parsing;
 - certificate/private-key matching;
-- subject and SAN extraction;
-- validity dates;
+- subject/SAN/validity extraction;
 - SHA-256 fingerprint generation;
-- malformed PEM handling;
-- encrypted/unsupported key behavior;
+- malformed or unsupported key behavior;
 - expired and not-yet-valid certificates.
-
-These tests require no WatchGuard dependency.
 
 ### 2. WatchGuard API client
 
-The HTTP client should depend on an injectable base URL and transport so the test suite can use an in-process mock HTTP server.
+The HTTP client uses an injectable base URL, so tests can run against `httptest.Server` and assert:
 
-Mock the WatchGuard endpoints and assert:
+- OAuth/token authentication;
+- `Authorization` and `WatchGuard-API-Key` headers;
+- normal Firebox discovery;
+- Service Provider `include_hierarchy` discovery;
+- cloud-managed vs locally-managed rejection;
+- certificate create/get/install payloads;
+- install responses where `device` is an array;
+- transaction polling from non-terminal to terminal state;
+- 401 token refresh;
+- useful HTTP error handling;
+- unsafe POST mutations are not blindly retried;
+- secrets/private keys are not leaked into errors.
 
-- OAuth/token requests use the expected credentials and headers;
-- API calls send `Authorization: Bearer ...` and `WatchGuard-API-Key`;
-- device-list responses are decoded correctly;
-- cloud-managed vs locally-managed devices are handled correctly;
-- certificate create/get/install requests use the expected JSON payloads;
-- 401, 403, 404, 409, 429 and 5xx responses become useful CLI errors;
-- token refresh works;
-- retry behavior never causes unsafe duplicate deployment;
-- secrets/private keys are not leaked into logs or error messages.
-
-Official API references:
+Official references:
 
 - https://www.watchguard.com/help/docs/API/Content/en-US/firebox/management/v1/management.html
 - https://www.watchguard.com/help/docs/API/Content/en-US/firebox/management/v1/certificates_fireboxes.html
+- https://www.watchguard.com/help/docs/API/Content/en-US/firebox/management/v1/device_details.html
+- https://www.watchguard.com/help/docs/API/Content/en-US/firebox/management/v1/deployments.html
 
-### 3. Contract fixtures
+### 3. Contract shapes
 
-Store sanitized JSON fixtures that reflect the documented API response/request shapes. Tests should deserialize these fixtures so accidental client-model drift is caught early.
+Mocks should reflect documented production shapes rather than convenient invented JSON. In particular, asynchronous command responses may contain a `device` array and deployments may return transaction arrays.
 
-Do not claim contract fixtures prove that WatchGuard production behavior matches the docs. They prove only that our client matches the documented contract.
+Passing these tests proves only that the client matches the documented contract. It does not prove WatchGuard production behavior or appliance behavior.
 
-### 4. Idempotency logic
+### 4. Creation idempotency
 
-The core decision logic can be tested completely offline:
+The part we can prove offline is certificate-object idempotency:
 
 ```text
-local fingerprint == remote fingerprint
-    -> no upload/install
+same local and remote fingerprint
+    -> reuse remote certificate object
+    -> no duplicate upload
 
-local fingerprint != remote fingerprint
-    -> deployment required
+different fingerprint
+    -> create a new certificate object
 ```
 
-Cover edge cases such as:
+The tool may still request installation of an already-existing certificate object because cloud inventory does not prove which certificate an actual Firebox service is using.
 
-- same subject but different key/certificate;
-- same domain with renewed validity dates;
-- duplicate names;
-- missing remote certificate;
-- multiple certificates returned for one device.
+Cover:
 
-### 5. Dry-run mode
+- same subject but renewed certificate;
+- same domain with new validity dates;
+- duplicate fingerprints;
+- conflicting fixed names;
+- missing remote object;
+- multiple objects returned for one device.
 
-A planned `--dry-run` mode should parse configuration and certificates and show what would be done without sending mutation requests.
+### 5. Dry-run
 
-This is valuable both for tests and for first-time users.
-
-Example:
+`--dry-run` must parse local inputs, authenticate/read remote state and show the mutation plan while issuing **zero mutation requests**.
 
 ```bash
 wgcert deploy \
@@ -91,42 +87,62 @@ wgcert deploy \
   --dry-run
 ```
 
-Expected output should make clear that no WatchGuard changes were made.
+### 6. Transaction waiting
 
-### 6. TLS verification
+`--wait 2m` should be tested with mocked transaction sequences such as:
 
-The optional external verification step can be tested against a local TLS server created by the Go test suite.
+```text
+in_progress -> complete
+pending -> failed
+pending -> context deadline exceeded
+```
 
-The test can start a TLS listener with a known generated certificate and verify that `wgcert check --verify-host ...` reads and compares the served certificate fingerprint correctly.
+The install transaction and optional configuration-deployment transaction are separate operations and should be surfaced separately in text/JSON output.
 
-### 7. CLI integration tests
+### 7. TLS verification
 
-Build the binary and execute commands against the mock API server:
+The optional external verification step can be exercised against a local TLS server using a known generated certificate.
+
+`wgcert check --verify-host ...` should compare the actually served leaf-certificate fingerprint to WatchGuard inventory. During deploy, `--verify-host` should compare it to the local certificate intended for deployment.
+
+### 8. CLI integration
+
+Exercise:
 
 ```text
 wgcert devices
-wgcert deploy ...
+wgcert devices --include-hierarchy
+wgcert deploy --dry-run ...
+wgcert deploy --wait ...
 wgcert check ...
+wgcert version
 ```
 
-Assert exit codes, stdout/stderr and JSON output if a machine-readable mode is added.
+Assert exit behavior, text output and JSON output where applicable.
 
-## What we cannot honestly validate without a real Firebox
+## What mocks cannot prove
 
-Mocks cannot prove:
+Without a real Firebox we cannot honestly claim:
 
-- that WatchGuard accepts every payload exactly as documented;
-- that an installed certificate becomes active in the expected Firebox configuration;
-- how existing certificate references behave during renewal;
-- how long configuration deployment takes;
-- whether particular Fireware versions behave differently;
-- whether the externally served certificate changes as expected after deployment.
+- WatchGuard production accepts every payload exactly as documented;
+- the install transaction causes the intended appliance configuration to use the certificate;
+- an existing service reference follows a renewed/replaced certificate automatically;
+- a full configuration deployment is necessary for this workflow;
+- the timing/terminal statuses observed in production match the documentation;
+- Fireware versions behave identically;
+- the externally served certificate changes as intended.
 
-These claims must remain marked unverified until tested against a real cloud-managed Firebox.
+These remain explicit validation questions.
+
+## Why `--deploy-config` is opt-in
+
+`--deploy-config` requests a **full configuration deployment** with `staged=false`. WatchGuard documents that deployment as distributing pending device configuration. It may therefore include changes unrelated to wgcert.
+
+Do not add this flag to unattended Certbot/acme.sh hooks until lab testing demonstrates that it is necessary and safe for the intended workflow.
 
 ## Best path to real-device testing
 
-The preferred lab is **FireboxV**, WatchGuard's virtual Firebox appliance, rather than buying physical hardware.
+Prefer **FireboxV**, WatchGuard's virtual Firebox appliance, over purchasing physical hardware.
 
 WatchGuard documents FireboxV evaluations under:
 
@@ -136,52 +152,53 @@ Official trial documentation:
 
 https://www.watchguard.com/help/docs/help-center/en-US/content/en-US/WG-Cloud/trials_enable-trial-licenses.html
 
-Whether an evaluation can be self-activated depends on the WatchGuard account and its permissions/relationship. If we cannot obtain an evaluation directly, the fallback should be an external beta tester who already has a cloud-managed Firebox.
+Evaluation availability depends on account type and permissions. If we cannot obtain one directly, use an external beta tester who already manages a cloud-managed Firebox.
 
 ## Real-device validation checklist
 
-Before v1.0 / production-ready wording, complete all of these on a disposable lab device or explicitly approved test device:
+Before production-ready wording, complete the following on a disposable lab device or explicitly approved test device:
 
 1. authenticate using dedicated API credentials;
-2. discover the device through the API;
-3. confirm it is reported as cloud-managed;
-4. upload a non-production test certificate;
-5. retrieve it and compare the API fingerprint;
-6. install the certificate;
-7. confirm configuration deployment succeeds;
-8. confirm the certificate is usable in the intended Firebox configuration;
-9. renew/replace it with another certificate for the same hostname;
-10. verify whether existing configuration references continue to work;
-11. repeat the same deployment and confirm idempotency;
-12. verify the externally served certificate where applicable;
-13. test rollback/error behavior;
-14. remove test credentials and test certificates.
+2. discover the Firebox through `wgcert devices`;
+3. confirm `cloud_managed=yes`;
+4. run a dry-run with a non-production test certificate;
+5. create/reuse the remote certificate object;
+6. request installation;
+7. wait for and record the real install transaction statuses;
+8. re-read the object and compare its fingerprint;
+9. determine whether a separate configuration deployment is required;
+10. if required, review pending changes before using `--deploy-config`;
+11. verify the intended Firebox service is using the certificate;
+12. repeat with a renewed certificate for the same hostname;
+13. determine whether existing configuration references continue to work;
+14. repeat the same certificate and confirm no duplicate certificate object is created;
+15. verify the externally served certificate where applicable;
+16. test one rejected/failed transaction and its error output;
+17. remove test credentials and test certificates.
 
-## Beta testing before owning a device
+The critical product question is steps 11–13: can renewal become active without a recurring manual configuration step?
 
-An OSS project can reach real hardware through volunteer testers before the maintainer owns a Firebox.
+## External beta testing
 
-Once the mock-tested CLI is ready:
+Once the mock-tested prerelease is available:
 
-- publish a clearly marked pre-release;
-- open a GitHub issue titled along the lines of `Looking for cloud-managed Firebox beta testers`;
-- request only non-sensitive diagnostics;
-- never ask users to paste API keys or private keys into issues;
-- offer a `--debug` mode that redacts credentials and PEM/private-key material;
-- ask testers to report Fireware version, device model, cloud-managed status, command result and sanitized error response.
+- clearly label it as experimental;
+- ask specifically for cloud-managed Firebox testers;
+- request model, Fireware version, intended certificate use and sanitized command output;
+- never request API keys, access passwords or private keys in issues;
+- distinguish “API command accepted” from “certificate confirmed active on service”;
+- collect whether the tester manages one Firebox or a multi-device/MSP estate.
 
-This can produce the first real-device feedback with almost no infrastructure cost.
+One genuine completed renewal is more valuable than many stars or downloads.
 
-## Testing confidence model
+## Confidence ladder
 
-A useful status ladder is:
-
-- **Level 0 — design:** based only on documentation;
-- **Level 1 — unit-tested:** certificate/config/domain logic tested offline;
-- **Level 2 — mocked API:** complete CLI flows pass against an API simulator;
-- **Level 3 — WatchGuard account/API:** authentication/discovery tested against the real cloud API;
-- **Level 4 — FireboxV:** create/install/check tested on a virtual Firebox;
-- **Level 5 — independent beta:** at least one external operator completes a real renewal;
+- **Level 0 — design:** documentation only;
+- **Level 1 — unit-tested:** local certificate/config logic tested offline;
+- **Level 2 — mocked API:** complete documented CLI/API flows exercised against mocks;
+- **Level 3 — WatchGuard Cloud:** real authentication/discovery tested;
+- **Level 4 — FireboxV:** create/install/wait/check tested on a virtual appliance;
+- **Level 5 — independent beta:** an external operator completes a real renewal;
 - **Level 6 — production validated:** multiple independent installations survive real renewal cycles.
 
-The README should state the current level rather than using vague claims such as "production ready".
+Use the level in public documentation instead of vague “production ready” wording.
