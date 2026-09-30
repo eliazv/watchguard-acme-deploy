@@ -17,12 +17,27 @@ type Device struct {
 }
 
 func (c *Client) Devices(ctx context.Context) ([]Device, error) {
+	return c.DevicesWithHierarchy(ctx, false)
+}
+
+func (c *Client) DevicesWithHierarchy(ctx context.Context, includeHierarchy bool) ([]Device, error) {
 	var r struct {
 		Data []Device `json:"data"`
 	}
-	err := c.request(ctx, "GET", c.accountPath("/info/")+"/devices?device_type=FB", nil, &r)
+	p := c.accountPath("/info/") + "/devices"
+	q := url.Values{}
+	if includeHierarchy {
+		// WatchGuard does not allow include_hierarchy together with device_type.
+		// For Service Provider accounts this includes Fireboxes from Subscriber accounts.
+		q.Set("include_hierarchy", "true")
+	} else {
+		q.Set("device_type", "FB")
+	}
+	p += "?" + q.Encode()
+	err := c.request(ctx, "GET", p, nil, &r)
 	return r.Data, err
 }
+
 func (c *Client) Device(ctx context.Context, id string) (Device, error) {
 	var r struct {
 		Data []Device `json:"data"`
