@@ -2,15 +2,13 @@
 
 ## Product statement
 
-`watchguard-acme-deploy` is a small open-source tool that takes an **already issued/renewed TLS certificate** and deploys it to one or more supported cloud-managed WatchGuard Fireboxes through the official Firebox Management API.
+`watchguard-acme-deploy` is a small open-source tool that takes an **already issued/renewed TLS certificate** and deploys it to supported cloud-managed WatchGuard Fireboxes through the official Firebox Management API.
 
-It is not an ACME client and it is not a certificate-management platform.
-
-The binary name is planned as `wgcert`.
+It is not an ACME client and it is not a certificate-management platform. The binary is `wgcert`.
 
 ## Primary use case
 
-A sysadmin already has a working ACME renewal process, for example Certbot or acme.sh:
+A sysadmin already has a working ACME renewal process such as Certbot or acme.sh:
 
 ```text
 certificate renewed
@@ -25,7 +23,7 @@ wgcert deploy
 WatchGuard API
         |
         v
-Firebox
+cloud-managed Firebox
 ```
 
 ## Supported target
@@ -42,55 +40,43 @@ Locally-managed Fireboxes are explicitly out of scope for v0.1.
 
 ### `wgcert devices`
 
-Purpose: discover available devices and make compatibility obvious before a user attempts a deployment.
-
-Example:
+Discover devices and make compatibility obvious before a user attempts a deployment.
 
 ```bash
 wgcert devices
-```
-
-Suggested output:
-
-```text
-ID          NAME              MODEL   FIRMWARE   MANAGEMENT   STATUS
-FB-12345    HQ-Firebox        M390    12.x       cloud        online
-FB-67890    Branch-Firebox    T80     12.x       local        online
-```
-
-Machine-readable output may be added as:
-
-```bash
+wgcert devices --include-hierarchy
 wgcert devices --output json
 ```
 
+`--include-hierarchy` is intended for WatchGuard Service Provider accounts and asks the Device Details API to include Subscriber-account devices. v0.1 treats this as discovery only; it is not a fleet deployment feature.
+
 ### `wgcert deploy`
 
-Purpose: inspect the local certificate, compare it with the current remote state, and deploy only when required.
-
-Example:
+Inspect the local certificate, reuse an identical remote certificate object when one already exists, request installation and verify the remote object after the request.
 
 ```bash
 wgcert deploy \
   --device FB-12345 \
   --cert /etc/letsencrypt/live/firewall.example.com/fullchain.pem \
-  --key /etc/letsencrypt/live/firewall.example.com/privkey.pem
+  --key /etc/letsencrypt/live/firewall.example.com/privkey.pem \
+  --wait 2m
 ```
 
-Required v0.1 behavior:
+Required behavior:
 
 1. parse certificate and private key;
 2. verify that certificate and key match;
 3. extract local fingerprint and metadata;
-4. retrieve existing device certificates;
-5. decide whether deployment is required;
-6. create/upload the certificate if required;
-7. install it to the target device;
-8. retrieve state again;
-9. verify the resulting fingerprint;
-10. return a meaningful exit code.
+4. retrieve existing device certificate objects;
+5. reuse an object with the same fingerprint or create one when required;
+6. request installation on the target device;
+7. optionally wait for the asynchronous install transaction with `--wait`;
+8. retrieve certificate state again;
+9. verify that the remote certificate object matches the local fingerprint;
+10. optionally verify the certificate served by a named TLS endpoint;
+11. return a meaningful exit code.
 
-Useful flags:
+Useful flags currently include:
 
 ```text
 --device
@@ -99,51 +85,50 @@ Useful flags:
 --name
 --dry-run
 --output text|json
---verbose
+--wait 2m
+--verify-host host:port
+--deploy-config
 ```
 
-Do not add many options until a real integration requires them.
+`--deploy-config` requests a full configuration deployment. This may include **all pending changes on the device**, not only certificate-related changes, and must remain opt-in.
 
 ### `wgcert check`
 
-Purpose: inspect current certificate state without modifying the device.
-
-Example:
+Inspect current WatchGuard Cloud certificate inventory without modifying the device, with optional external TLS verification:
 
 ```bash
 wgcert check --device FB-12345
+wgcert check --device FB-12345 --verify-host firewall.example.com:443
 ```
 
-Optional external TLS verification:
-
-```bash
-wgcert check \
-  --device FB-12345 \
-  --verify-host firewall.example.com:443
-```
-
-The external TLS check is useful because API state and the certificate actually served on a network endpoint are two different things.
+API inventory and the certificate actually served by a Firebox service are different facts. `--verify-host` is the stronger end-to-end check where the intended service is reachable through TLS.
 
 ## Idempotency
 
-Idempotency is a core requirement, not a later enhancement.
+Creation idempotency is a core requirement, but certificate inventory must not be confused with active service configuration.
 
-Simplified rule:
+The v0.1 rule is:
 
 ```text
-if local fingerprint == installed fingerprint:
-    exit successfully without mutation
+if a remote certificate object has the local fingerprint:
+    do not upload a duplicate certificate object
 else:
-    deploy and verify
+    create the certificate object
+
+request install
+optionally wait for the asynchronous install transaction
+re-read remote certificate state
+verify fingerprint
+optionally verify the served TLS endpoint
 ```
 
-The implementation must not use only certificate names or subjects as identity because a renewal normally preserves hostname/subject while changing the certificate itself.
+The tool may therefore issue another install request when the same certificate object already exists. Merely finding the object in WatchGuard Cloud does not prove that the intended management UI, proxy, VPN endpoint or other service is actively using it.
+
+Identity must be based on the certificate fingerprint, not only its name or subject, because renewals commonly preserve hostname/subject while changing the certificate.
 
 ## Configuration
 
-Initial configuration should work with environment variables so Certbot/acme.sh hooks can call the binary non-interactively.
-
-Proposed names:
+The initial configuration uses environment variables so Certbot/acme.sh hooks can call the binary non-interactively:
 
 ```text
 WATCHGUARD_ACCOUNT_ID
@@ -154,34 +139,21 @@ WATCHGUARD_ACCESS_ID
 WATCHGUARD_ACCESS_PASSWORD
 ```
 
-A small config file can be added if it genuinely improves MSP/multi-device usage, but it is not required for the first usable CLI.
+A config file may be added only if real MSP/multi-device feedback justifies it.
 
 Secrets must never be emitted in logs, JSON errors, stack traces or debug output.
 
 ## Architecture
 
-Recommended language: **Go**.
-
-Suggested structure:
+Language: **Go**.
 
 ```text
 cmd/
   wgcert/
-    main.go
 internal/
   watchguard/
-    auth.go
-    client.go
-    devices.go
-    certificates.go
   certificate/
-    parse.go
-    fingerprint.go
-    verify.go
   config/
-    config.go
-  output/
-    output.go
 hooks/
   certbot/
   acme.sh/
@@ -189,42 +161,36 @@ testdata/
 docs/
 ```
 
-Important implementation property: the WatchGuard client must accept an injectable HTTP base URL/transport so almost the entire integration can be tested against an in-process fake server.
+The WatchGuard client accepts an injectable HTTP base URL/transport so the integration can be exercised against an in-process fake server without owning a Firebox.
+
+## Asynchronous operations
+
+WatchGuard certificate installation and configuration deployment are transaction-based operations.
+
+`--wait <duration>` polls the relevant transaction until it reaches a known successful or failed terminal state, or until the context timeout expires. Without `--wait`, an accepted request means only that WatchGuard accepted the command, not that the device completed it.
+
+The install response shape must remain tolerant of documented response variations such as `device` being an array.
 
 ## Error behavior
 
-CLI errors should be actionable.
-
-Prefer:
-
-```text
-Error: device FB-12345 is locally managed.
-The WatchGuard Certificate API supports cloud-managed Fireboxes only.
-```
-
-rather than:
-
-```text
-HTTP 200: empty response
-```
-
-Important categories:
+CLI errors should be actionable. Important categories include:
 
 - configuration missing;
 - authentication rejected;
-- unsupported device;
-- certificate/key invalid;
-- certificate/key mismatch;
-- rate limited;
-- API unavailable;
-- deployment rejected;
-- verification failed.
+- unsupported locally-managed device;
+- certificate/key invalid or mismatched;
+- rate limited/API unavailable;
+- certificate-name collision;
+- install transaction failed/timed out;
+- configuration deployment rejected/failed;
+- remote fingerprint verification failed;
+- external TLS verification failed.
 
-Use distinct non-zero exit codes only if they improve scripting; avoid an unnecessarily complex exit-code taxonomy in v0.1.
+Use distinct non-zero exit codes only if they materially improve scripting; avoid an unnecessarily complex taxonomy in v0.1.
 
 ## Security requirements
 
-The tool handles private keys and privileged API credentials, so v0.1 should already enforce sensible behavior:
+The tool handles private keys and privileged API credentials, so v0.1 must already enforce sensible behavior:
 
 - never print private-key contents;
 - never print access password or API key;
@@ -232,82 +198,75 @@ The tool handles private keys and privileged API credentials, so v0.1 should alr
 - avoid persisting private keys or tokens;
 - use TLS verification for WatchGuard API requests;
 - support timeouts;
-- avoid retrying unsafe mutations blindly;
-- make `--dry-run` genuinely mutation-free.
+- never retry unsafe mutations blindly;
+- make `--dry-run` genuinely mutation-free;
+- do not claim an API inventory match proves an active service certificate.
 
 ## ACME integration
 
 Do not implement certificate issuance.
 
-After the CLI works independently, document a Certbot deploy hook and an acme.sh deploy hook.
-
-Conceptually:
-
-```bash
-certbot renew --deploy-hook "/usr/local/bin/wgcert deploy ..."
-```
-
-Exact hook examples should be tested before being presented as copy/paste production commands.
+The CLI can be invoked after renewal by Certbot or acme.sh using the scripts under `hooks/`. Automatic hooks should not enable `--deploy-config` until full-device deployment behavior has been validated on a lab Firebox.
 
 ## Out of scope
 
 Do not implement in the initial timebox:
 
-- dashboard;
-- web UI;
-- database;
-- users;
-- SaaS backend;
-- billing;
+- dashboard or web UI;
+- database/users/billing;
+- hosted SaaS backend;
 - scheduler;
 - ACME protocol implementation;
 - certificate authority functionality;
 - email/Slack notifications;
-- full certificate inventory product;
+- generic certificate inventory product;
 - SSH/Expect support for locally-managed Fireboxes;
+- batch/fleet deployment orchestration;
 - FortiGate/Palo Alto/F5/other vendors.
 
-## Development order
+## Development / validation order
 
 ### Phase 1 — offline core
 
-- Go project;
-- config;
+- Go project and CLI;
 - certificate parsing/fingerprint;
-- CLI skeleton;
+- configuration;
 - mock WatchGuard server;
-- tests.
+- unit and integration tests;
+- dry-run.
 
 ### Phase 2 — API implementation
 
 - OAuth;
 - device discovery;
+- Service Provider hierarchy discovery;
 - certificate GET/create/install;
-- idempotency;
-- dry-run;
+- asynchronous transaction polling;
+- remote-object fingerprint verification;
 - error handling.
 
 ### Phase 3 — verification
 
 - `check`;
-- optional TLS endpoint verification;
-- realistic API fixtures;
-- integration tests against fake server.
+- TLS endpoint verification;
+- realistic documented API response shapes;
+- hooks and release artifacts.
 
 ### Phase 4 — real environment
 
 - WatchGuard API credentials;
 - FireboxV or real cloud-managed Firebox;
-- end-to-end renewal test;
-- fix API/documentation differences.
+- create/install/wait flow;
+- determine whether the intended Firebox service switches certificate automatically;
+- renewal of the same hostname;
+- verify configuration-reference behavior;
+- fix any gap between production API behavior and documentation.
 
-### Phase 5 — release experiment
+### Phase 5 — external validation
 
-- Certbot hook;
-- acme.sh hook;
-- binaries for common platforms;
-- `v0.1.0` pre-release;
-- request external beta testers.
+- request external beta testers;
+- capture model/Fireware/use-case metadata without secrets;
+- observe at least one genuine renewal cycle before using production-ready wording.
 
 ## Go / no-go condition
 
@@ -319,8 +278,6 @@ If this cannot be automated reliably with the supported APIs, stop the experimen
 
 ## Timebox
 
-Target: 3-5 focused development days.
+Target: 3–5 focused development days.
 
-Absolute initial timebox: approximately one week.
-
-The timebox can be extended only when real-device/API evidence reveals a small, tractable path to a useful release.
+Absolute initial timebox: approximately one week. Extend it only when real-device/API evidence reveals a small, tractable path to a useful release.
