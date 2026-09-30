@@ -19,13 +19,18 @@ import (
 	"github.com/eliazv/watchguard-acme-deploy/internal/watchguard"
 )
 
-var safeName = regexp.MustCompile(`^[A-Za-z0-9 ()*._-]{1,58}$`)
+var (
+	safeName = regexp.MustCompile(`^[A-Za-z0-9 ()*._-]{1,58}$`)
+	version  = "dev"
+)
 
 type result struct {
 	Action              string    `json:"action"`
 	Device              string    `json:"device,omitempty"`
 	Name                string    `json:"name,omitempty"`
 	Fingerprint         string    `json:"fingerprint,omitempty"`
+	RemoteFingerprint   string    `json:"remote_fingerprint,omitempty"`
+	RemoteMatchesLocal  *bool     `json:"remote_matches_local,omitempty"`
 	Subject             string    `json:"subject,omitempty"`
 	SAN                 []string  `json:"san,omitempty"`
 	Expires             string    `json:"expires,omitempty"`
@@ -63,6 +68,12 @@ func emit(w io.Writer, format string, v any) error {
 		if x.Fingerprint != "" {
 			fmt.Fprintf(w, "SHA256: %s\n", x.Fingerprint)
 		}
+		if x.RemoteFingerprint != "" {
+			fmt.Fprintf(w, "Remote SHA256: %s\n", x.RemoteFingerprint)
+		}
+		if x.RemoteMatchesLocal != nil {
+			fmt.Fprintf(w, "Remote certificate matches local: %t\n", *x.RemoteMatchesLocal)
+		}
 		if x.Subject != "" {
 			fmt.Fprintf(w, "Subject: %s\nSAN: %s\nExpires: %s\n", x.Subject, strings.Join(x.SAN, ", "), x.Expires)
 		}
@@ -98,12 +109,14 @@ func emit(w io.Writer, format string, v any) error {
 	}
 	return nil
 }
+
 func formatOK(s string) error {
 	if s != "text" && s != "json" {
 		return errors.New("--output must be text or json")
 	}
 	return nil
 }
+
 func certFingerprint(c watchguard.Certificate) string {
 	if c.PEM != "" {
 		block, _ := pem.Decode([]byte(c.PEM))
@@ -136,12 +149,33 @@ func findExisting(certs []watchguard.Certificate, fingerprint, name string) (*wa
 	return existing, nil
 }
 
+func verifyRemoteCertificate(certs []watchguard.Certificate, id, localFingerprint string) (string, error) {
+	for _, c := range certs {
+		if c.ID != id {
+			continue
+		}
+		remote := certFingerprint(c)
+		if remote == "" {
+			return "", fmt.Errorf("remote certificate %s has no fingerprint or parseable PEM", id)
+		}
+		if certificate.NormalizeFingerprint(remote) != certificate.NormalizeFingerprint(localFingerprint) {
+			return remote, fmt.Errorf("remote certificate %s fingerprint does not match local certificate", id)
+		}
+		return remote, nil
+	}
+	return "", fmt.Errorf("remote certificate %s was not found after install request", id)
+}
+
 func run(ctx context.Context, args []string, w io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: wgcert devices|check|deploy [flags]")
+		return errors.New("usage: wgcert devices|check|deploy|version [flags]")
 	}
 	if args[0] == "help" || args[0] == "--help" {
-		_, err := fmt.Fprintln(w, "usage: wgcert devices|check|deploy [flags]\nRun wgcert <command> --help for command flags.")
+		_, err := fmt.Fprintln(w, "usage: wgcert devices|check|deploy|version [flags]\nRun wgcert <command> --help for command flags.")
+		return err
+	}
+	if args[0] == "version" || args[0] == "--version" {
+		_, err := fmt.Fprintf(w, "wgcert %s\n", version)
 		return err
 	}
 	cmd := args[0]
@@ -154,8 +188,9 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 	dry := fs.Bool("dry-run", false, "show plan without mutations")
 	output := fs.String("output", "text", "text or json")
 	verifyHost := fs.String("verify-host", "", "TLS host:port")
+	includeHierarchy := fs.Bool("include-hierarchy", false, "include Subscriber-account Fireboxes for Service Provider accounts")
 	deployConfig := fs.Bool("deploy-config", false, "deploy all pending device configuration changes")
-	wait := fs.Duration("wait", 0, "wait for deployment transaction, e.g. 2m")
+	wait := fs.Duration("wait", 0, "wait for asynchronous install/deployment transactions, e.g. 2m")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -171,6 +206,9 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 	if cmd != "devices" && cmd != "check" && cmd != "deploy" {
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+	if cmd != "devices" && *includeHierarchy {
+		return errors.New("--include-hierarchy is supported only by the devices command")
+	}
 	if cmd != "devices" && *device == "" {
 		return errors.New("--device is required")
 	}
@@ -180,9 +218,7 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 	if *wait < 0 {
 		return errors.New("--wait must be non-negative")
 	}
-	if *wait > 0 && !(*deployConfig) {
-		return errors.New("--wait requires --deploy-config")
-	}
+
 	var bundle certificate.Bundle
 	var err error
 	if cmd == "deploy" {
@@ -197,18 +233,20 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 	if cmd == "deploy" && !safeName.MatchString(*name) {
 		return errors.New("--name must be 1-58 allowed characters: letters, digits, spaces, (), *, ., - and _")
 	}
+
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
 	}
 	client := watchguard.New(cfg)
 	if cmd == "devices" {
-		devices, err := client.Devices(ctx)
+		devices, err := client.DevicesWithHierarchy(ctx, *includeHierarchy)
 		if err != nil {
 			return err
 		}
 		return emit(w, *output, devices)
 	}
+
 	_, err = client.Device(ctx, *device)
 	if err != nil {
 		return err
@@ -239,6 +277,7 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 		}
 		return emit(w, *output, r)
 	}
+
 	san := append([]string{}, bundle.Leaf.DNSNames...)
 	for _, ip := range bundle.Leaf.IPAddresses {
 		san = append(san, ip.String())
@@ -259,6 +298,7 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 		}
 		return emit(w, *output, r)
 	}
+
 	if existing == nil {
 		created, err := client.CreateCertificate(ctx, *device, *name, bundle.CertPEM, bundle.KeyPEM)
 		if err != nil {
@@ -269,6 +309,7 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 		r.CertificateID = existing.ID
 		r.Name = existing.Name
 	}
+
 	installed, err := client.InstallCertificate(ctx, *device, r.CertificateID)
 	if err != nil {
 		return fmt.Errorf("certificate %s exists; install failed: %w", r.CertificateID, err)
@@ -276,6 +317,29 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 	r.Action = "install_requested"
 	r.InstallID = installed.ID
 	r.InstallStatus = installed.Status
+	if *wait > 0 {
+		deadline, cancel := context.WithTimeout(ctx, *wait)
+		tx, err := client.WaitTransaction(deadline, installed.ID, 3*time.Second)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("certificate %s exists; install transaction failed: %w", r.CertificateID, err)
+		}
+		r.InstallStatus = tx.Status
+		r.Action = "install_complete"
+	}
+
+	remoteCerts, err := client.Certificates(ctx, *device)
+	if err != nil {
+		return fmt.Errorf("install command %s accepted; remote certificate verification failed: %w", installed.ID, err)
+	}
+	remoteFP, err := verifyRemoteCertificate(remoteCerts, r.CertificateID, bundle.Fingerprint)
+	matches := err == nil
+	r.RemoteFingerprint = remoteFP
+	r.RemoteMatchesLocal = &matches
+	if err != nil {
+		return fmt.Errorf("install command %s accepted; %w", installed.ID, err)
+	}
+
 	if *deployConfig {
 		deployed, err := client.DeployConfiguration(ctx, *device)
 		if err != nil {
@@ -286,27 +350,16 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 		r.Action = "deployment_requested"
 		if *wait > 0 {
 			deadline, cancel := context.WithTimeout(ctx, *wait)
-			defer cancel()
-			for {
-				tx, err := client.Transaction(deadline, deployed.ID)
-				if err != nil {
-					return err
-				}
-				r.DeploymentStatus = tx.Status
-				if tx.Status == "complete" {
-					break
-				}
-				if tx.Status == "failed" || tx.Status == "imaged" || tx.Status == "timed_out" || tx.Status == "canceled" {
-					return fmt.Errorf("configuration deployment %s ended with status %s", tx.ID, tx.Status)
-				}
-				select {
-				case <-deadline.Done():
-					return fmt.Errorf("configuration deployment %s did not complete: %w", tx.ID, deadline.Err())
-				case <-time.After(3 * time.Second):
-				}
+			tx, err := client.WaitTransaction(deadline, deployed.ID, 3*time.Second)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("configuration deployment %s failed: %w", deployed.ID, err)
 			}
+			r.DeploymentStatus = tx.Status
+			r.Action = "deployment_complete"
 		}
 	}
+
 	if *verifyHost != "" {
 		fp, err := certificate.ServedFingerprint(*verifyHost)
 		if err != nil {
@@ -317,9 +370,10 @@ func run(ctx context.Context, args []string, w io.Writer) error {
 			return fmt.Errorf("served TLS fingerprint does not match local certificate (install command %s)", installed.ID)
 		}
 	}
-	r.Message = "WatchGuard accepted the command. Confirm it became active on the intended Firebox service; API inventory alone cannot prove this."
+	r.Message = "WatchGuard accepted the command and the remote certificate object matches the local certificate. Confirm the intended Firebox service is active with --verify-host; API inventory alone cannot prove this."
 	return emit(w, *output, r)
 }
+
 func main() {
 	ctx := context.Background()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
