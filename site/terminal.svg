@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="510" viewBox="0 0 740 510" role="img" aria-labelledby="title desc">
+  <title id="title">Example wgcert dry-run</title><desc id="desc">An illustrative terminal showing certificate metadata and a plan with no changes made.</desc>
+  <rect width="740" height="510" rx="12" fill="#233437"/>
+  <path d="M12 0h716a12 12 0 0 1 12 12v50H0V12A12 12 0 0 1 12 0" fill="#304548"/>
+  <circle cx="31" cy="31" r="6" fill="#b8c9c2"/><circle cx="53" cy="31" r="6" fill="#8fa7a0"/><circle cx="75" cy="31" r="6" fill="#6b8d84"/>
+  <text x="370" y="36" text-anchor="middle" font-family="Consolas,monospace" font-size="14" fill="#d2dfd9">wgcert / dry-run</text>
+  <g font-family="Consolas,monospace" font-size="16" fill="#e3ebe7">
+    <text x="34" y="105"><tspan fill="#8ac6b5">$</tspan> wgcert deploy --device FB-12345 \</text>
+    <text x="53" y="133">--cert fullchain.pem --key privkey.pem --dry-run</text>
+    <text x="34" y="183" fill="#8ac6b5">Certificate</text>
+    <text x="53" y="211">Subject: CN=firewall.example.com</text>
+    <text x="53" y="239">SAN: firewall.example.com</text>
+    <text x="53" y="267">SHA256: 91:39:…  (example)</text>
+    <text x="34" y="317" fill="#8ac6b5">Target</text>
+    <text x="53" y="345">Device: FB-12345</text>
+    <text x="34" y="395" fill="#8ac6b5">Plan</text>
+    <text x="53" y="423">Create certificate, then request installation</text>
+    <text x="34" y="475" fill="#c9dfd4">DRY RUN: no changes made.</text>
+  </g>
+</svg>

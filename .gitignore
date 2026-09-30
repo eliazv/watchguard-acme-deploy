@@ -1,0 +1,7 @@
+/wgcert
+/wgcert.exe
+/dist/
+/.toolchain/
+/.gocache/
+/.go-toolchain.zip
+*.test

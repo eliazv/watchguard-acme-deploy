@@ -1,0 +1,23 @@
+name: Feature request
+description: Describe a concrete certificate deployment workflow.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Current workflow and problem
+      description: Which manual step do you want to automate?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: input
+    id: scale
+    attributes:
+      label: Approximate number of Fireboxes and accounts
+      placeholder: 12 cloud-managed Fireboxes across 3 subscriber accounts

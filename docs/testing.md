@@ -1,5 +1,13 @@
 # Testing without WatchGuard hardware
 
+## Implemented offline checks
+
+Run `go test ./...` and `go vet ./...`. The suite generates X.509 certificate/key pairs, checks mismatch detection and fingerprints, exercises the documented OAuth/device/certificate/install/deployment requests against `httptest.Server`, verifies that POST mutations are not retried after an HTTP 500 and that API errors do not include response bodies, and checks that CLI dry-run sends no mutation request.
+
+The remaining high-value validation is on a cloud-managed Firebox. In particular, the install command is asynchronous, and the certificate inventory reports WatchGuard Cloud objects rather than the certificate served on a specific Firebox endpoint. Test both a real deployment transaction and `--verify-host` before claiming a renewal is fully automatic.
+
+`--deploy-config` sends a full configuration deployment with `staged=false`. WatchGuard documents that this distributes all pending configuration changes for that device. Review those changes before using the flag.
+
 This project can be developed to a high confidence level without initially owning a WatchGuard appliance, but it must distinguish between **software correctness** and **real-device validation**.
 
 ## What we can test without a Firebox

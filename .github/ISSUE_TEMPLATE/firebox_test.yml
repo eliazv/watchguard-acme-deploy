@@ -1,0 +1,49 @@
+name: Tested on Firebox
+description: Share sanitized results from a real Firebox or FireboxV.
+title: "[Firebox test] "
+labels: [validation]
+body:
+  - type: markdown
+    attributes:
+      value: "Thank you for testing. Never post certificate private keys, API credentials, access tokens, or unredacted HTTP responses. A certificate hostname may also identify your network; replace it if needed."
+  - type: dropdown
+    id: management
+    attributes:
+      label: Management mode
+      options: [Cloud-managed, Locally-managed, Unsure]
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Firebox model and Fireware version
+      placeholder: FireboxV, Fireware 12.x
+    validations:
+      required: true
+  - type: input
+    id: wgcert
+    attributes:
+      label: wgcert version and operating system
+      placeholder: v0.1.0, Linux amd64
+    validations:
+      required: true
+  - type: checkboxes
+    id: steps
+    attributes:
+      label: Steps completed
+      options:
+        - label: Device discovered
+        - label: Dry-run completed
+        - label: Certificate created
+        - label: Install command accepted
+        - label: Configuration deployment completed
+        - label: Intended service uses the new certificate
+        - label: External TLS fingerprint matched
+        - label: A second run avoided a duplicate upload
+  - type: textarea
+    id: details
+    attributes:
+      label: Results and sanitized errors
+      description: Include which Firebox service uses the certificate and whether existing configuration references survived renewal.
+    validations:
+      required: true

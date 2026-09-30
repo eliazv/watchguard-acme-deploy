@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible problem with wgcert.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include API keys, access tokens, passwords, private keys, or unredacted HTTP bodies."
+  - type: input
+    id: version
+    attributes:
+      label: wgcert version
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04 amd64
+    validations:
+      required: true
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      options: [devices, check, deploy, deploy --dry-run, hook]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use placeholders for file paths and device IDs if needed.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result and sanitized error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
