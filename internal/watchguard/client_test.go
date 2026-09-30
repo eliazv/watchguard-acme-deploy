@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/eliazv/watchguard-acme-deploy/internal/config"
 )
@@ -45,7 +46,8 @@ func TestDocumentedFlow(t *testing.T) {
 				w.Write([]byte(`{"id":"crt_1","device":"FB-123","name":"test"}`))
 			case strings.HasSuffix(r.URL.Path, "/certificates/install"):
 				installs.Add(1)
-				w.Write([]byte(`{"id":"install_1","status":"in_progress"}`))
+				// WatchGuard documents device as an array on install transaction responses.
+				w.Write([]byte(`{"id":"install_1","status":"in_progress","device":[123],"type":"install_certificate"}`))
 			case strings.HasSuffix(r.URL.Path, "/deployments"):
 				deploys.Add(1)
 				var b map[string]any
@@ -78,8 +80,12 @@ func TestDocumentedFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.InstallCertificate(ctx, "FB-123", created.ID); err != nil {
+	install, err := c.InstallCertificate(ctx, "FB-123", created.ID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if install.ID != "install_1" || string(install.Device) != `[123]` {
+		t.Fatalf("unexpected install transaction: %+v", install)
 	}
 	tx, err := c.DeployConfiguration(ctx, "FB-123")
 	if err != nil {
@@ -92,6 +98,37 @@ func TestDocumentedFlow(t *testing.T) {
 		t.Fatalf("unexpected counts: %d %d %d %d", auths.Load(), creates.Load(), installs.Load(), deploys.Load())
 	}
 }
+
+func TestWaitTransaction(t *testing.T) {
+	var reads atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" {
+			w.Write([]byte(`{"access_token":"token","expires_in":3600}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/transactions/install_1") {
+			if reads.Add(1) == 1 {
+				w.Write([]byte(`{"id":"install_1","status":"in_progress"}`))
+			} else {
+				w.Write([]byte(`{"id":"install_1","status":"complete"}`))
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer s.Close()
+	c := New(config.Config{AccountID: "ACC-1", APIURL: s.URL, AuthURL: s.URL, APIKey: "key", AccessID: "id", AccessPassword: "password"})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	tx, err := c.WaitTransaction(ctx, "install_1", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.Status != "complete" || reads.Load() != 2 {
+		t.Fatalf("unexpected wait result: %+v reads=%d", tx, reads.Load())
+	}
+}
+
 func TestMutationNotRetriedAndRedacted(t *testing.T) {
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
