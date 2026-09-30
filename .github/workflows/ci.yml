@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches-ignore:
+      - 'audit/pre-release-hardening'
   pull_request:
 
 permissions:
