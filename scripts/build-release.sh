@@ -8,7 +8,7 @@ build_one() {
   local os=$1 arch=$2 ext='' name
   name="wgcert_${version}_${os}_${arch}"
   [[ $os == windows ]] && ext='.exe'
-  GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "dist/wgcert${ext}" ./cmd/wgcert
+  GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${version}" -o "dist/wgcert${ext}" ./cmd/wgcert
   if [[ $os == windows ]]; then
     (cd dist && zip -q -j "${name}.zip" "wgcert${ext}" ../README.md ../LICENSE)
   else
