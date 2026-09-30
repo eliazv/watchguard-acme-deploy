@@ -23,11 +23,11 @@ wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --dry-run
 4. On a disposable cloud-managed Firebox, request installation and verify the intended service:
 
 ```sh
-wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem
+wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --wait 2m
 wgcert check --device FB-12345 --verify-host firewall.example.com:443
 ```
 
-The install command is asynchronous. `--deploy-config --wait 2m` requests a full device configuration deployment and waits for its transaction; it may deploy **all pending changes** for that device. Review them first.
+`--wait` waits for the asynchronous certificate-install transaction. If you also pass `--deploy-config`, wgcert requests a full device configuration deployment and waits for that transaction too. A full configuration deployment may include **all pending changes** for the device, so review them first.
 
 ## Goal
 
@@ -37,9 +37,11 @@ CLI:
 
 ```bash
 wgcert devices
+wgcert devices --include-hierarchy
 wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --dry-run
-wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem
+wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --wait 2m
 wgcert check --device FB-12345
+wgcert version
 ```
 
 The intended flow is:
@@ -60,7 +62,7 @@ WatchGuard Firebox Management API
 cloud-managed Firebox
       |
       v
-fingerprint / optional TLS verification
+remote fingerprint / optional TLS verification
 ```
 
 ## Scope
@@ -68,13 +70,15 @@ fingerprint / optional TLS verification
 Initial scope is intentionally small:
 
 - discover Firebox devices available through the WatchGuard API;
-- reject or clearly identify unsupported locally-managed devices;
+- optionally include Subscriber-account devices for WatchGuard Service Provider accounts;
+- reject unsupported locally-managed devices;
 - parse PEM certificates and private keys locally;
 - calculate certificate fingerprints and metadata;
 - upload/create certificates through the official API;
 - install them on selected cloud-managed Fireboxes;
-- make deployment idempotent where possible;
-- verify the resulting certificate metadata;
+- wait for asynchronous install/deployment transactions when requested;
+- make certificate creation idempotent where possible;
+- re-read the remote certificate object and verify its fingerprint;
 - optionally verify the certificate served by a hostname with a TLS handshake;
 - provide Certbot and acme.sh deploy-hook examples.
 
@@ -83,6 +87,18 @@ Out of scope for v0.1: dashboard, database, scheduler, user accounts, billing, c
 ## Current limitation
 
 WatchGuard's Certificate API works only with **cloud-managed Fireboxes** whose configuration is stored in WatchGuard Cloud. Locally-managed Fireboxes are not part of the v0.1 target.
+
+A matching certificate object in WatchGuard Cloud still does **not** prove that the intended management UI, proxy, VPN or other Firebox service is actively serving it. Use `--verify-host` where possible and validate the real service on a lab Firebox before unattended production use.
+
+## Service Provider discovery
+
+WatchGuard Service Provider accounts can ask the Device Details API to include devices from Subscriber accounts. `wgcert` exposes that discovery mode as:
+
+```sh
+wgcert devices --include-hierarchy
+```
+
+This is discovery only in v0.1. It does not yet implement a fleet configuration file or multi-account batch deployment workflow.
 
 ## Validation status
 
@@ -103,7 +119,10 @@ Requires Go 1.22 or later. From the repository root:
 ```sh
 go test ./...
 go build -o wgcert ./cmd/wgcert
+./wgcert version
 ```
+
+Release builds embed their tag in `wgcert version`; local builds report `dev` unless a version is injected with `-ldflags`.
 
 ## Configuration
 
@@ -124,23 +143,30 @@ Use read-only credentials for `devices` and `check` if available. Avoid shell hi
 
 ```sh
 wgcert devices --output json
+wgcert devices --include-hierarchy --output json
 wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --dry-run
-wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --output json
+wgcert deploy --device FB-12345 --cert fullchain.pem --key privkey.pem --wait 2m --output json
 wgcert check --device FB-12345 --output json
 wgcert check --device FB-12345 --verify-host firewall.example.com:443
 ```
 
-The generated certificate name includes a SHA-256 fingerprint prefix. Repeating a deploy reuses the matching remote certificate instead of uploading a duplicate. The install command may still be sent again because the certificate inventory does not prove which certificate is active. Do not use a fixed `--name` across renewals unless you manage name collisions yourself.
+The generated certificate name includes a SHA-256 fingerprint prefix. Repeating a deploy reuses the matching remote certificate instead of uploading a duplicate. The install command may still be sent again because certificate inventory does not prove which certificate is active. Do not use a fixed `--name` across renewals unless you manage name collisions yourself.
 
-`install` is asynchronous. A successful CLI response means WatchGuard accepted the command, not that the Firebox is already serving the new certificate. To request a full configuration deployment, add `--deploy-config`; this deploys **all pending configuration changes for the device**, not just the certificate. Add `--wait 2m` to wait for that deployment transaction to complete. Use `--verify-host` to compare the actual TLS endpoint against the local certificate after the Firebox has applied the change. The intended service must already reference the installed certificate; renewal reference behavior still needs Firebox validation.
+After WatchGuard accepts the install command, wgcert re-reads the remote certificate object and verifies that its fingerprint matches the local certificate. With `--wait`, it also polls the install transaction until it completes or fails. Neither check alone establishes that the intended Firebox service switched certificates; `--verify-host` performs a verified TLS handshake against the endpoint you name.
+
+To request a full configuration deployment, add `--deploy-config`. This deploys **all pending configuration changes for the device**, not just the certificate. When combined with `--wait`, wgcert also waits for the configuration-deployment transaction.
 
 ## ACME hooks
 
-`hooks/certbot/deploy.sh` uses Certbot's `RENEWED_LINEAGE`. Set `WGCERT_DEVICE` and the WatchGuard variables in the hook environment, then install the executable hook in Certbot's deploy-hook directory. `hooks/acme.sh/reload.sh` is for acme.sh's `--install-cert` workflow: set `WGCERT_CERT` and `WGCERT_KEY` to the installed fullchain and key paths, and run the script through `--reloadcmd`. Both scripts call `wgcert deploy` only after ACME has produced files. Add `--deploy-config` only after reviewing the device's pending configuration changes.
+`hooks/certbot/deploy.sh` uses Certbot's `RENEWED_LINEAGE`. Set `WGCERT_DEVICE` and the WatchGuard variables in the hook environment, then install the executable hook in Certbot's deploy-hook directory. `hooks/acme.sh/reload.sh` is for acme.sh's `--install-cert` workflow: set `WGCERT_CERT` and `WGCERT_KEY` to the installed fullchain and key paths, and run the script through `--reloadcmd`. Both scripts call `wgcert deploy` only after ACME has produced files.
+
+Do not add `--deploy-config` to unattended hooks until you have reviewed the device's pending configuration behavior and validated a complete renewal cycle on a lab Firebox.
 
 ## Validation level and feedback
 
-**Level 2: mocked API.** Unit, CLI, TLS, and mock HTTP tests pass locally. Real WatchGuard Cloud credentials and a cloud-managed Firebox are needed for the next validation levels. See [the testing plan](docs/testing.md). If you can test on a real Firebox, please use the [Firebox test issue template](https://github.com/eliazv/watchguard-acme-deploy/issues/new/choose) and report the model, Fireware version, management mode, intended certificate use, and sanitized result. Never post private keys or API credentials. See [SECURITY.md](SECURITY.md) for private vulnerability reporting.
+**Level 2: mocked API.** Unit, CLI, TLS, and mock HTTP tests cover the documented API flow, including asynchronous transaction shapes. Real WatchGuard Cloud credentials and a cloud-managed Firebox are needed for the next validation levels. See [the testing plan](docs/testing.md).
+
+If you can test on a real Firebox, please use the [Firebox test issue template](https://github.com/eliazv/watchguard-acme-deploy/issues/new/choose) and report the model, Fireware version, management mode, intended certificate use, and sanitized result. Never post private keys or API credentials. See [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 ## Disclaimer
 
